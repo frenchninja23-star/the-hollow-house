@@ -4,10 +4,15 @@ import { cellToWorld, worldToCell, hasLineOfSight, ROOMS } from "./level.js";
 
 const PATROL_SPEED = 2.0;
 const HUNT_SPEED = 4.3;
-const SIGHT_RANGE = 11; // cells
+// The house's rooms are only connected by one long, fully unobstructed
+// corridor - at longer sight ranges that corridor turns into a near
+// guaranteed instant-detection trap the moment both happen to be in it.
+const SIGHT_RANGE = 5; // cells
 const REPATH_INTERVAL = 0.5;
 const SEARCH_TIMEOUT = 8; // seconds of searching before giving up
 const CATCH_DISTANCE = 0.9;
+const NOTICE_DURATION = 0.5; // freeze-and-react beat before it commits to the chase
+const GRACE_PERIOD = 25; // seconds of safety after game start to get oriented
 
 export class Monster {
   constructor(scene, spawnCell) {
@@ -26,6 +31,7 @@ export class Monster {
     this.onStateChange = null;
     this.jitterSeed = Math.random() * 1000;
     this.age = 0;
+    this.graceTimer = GRACE_PERIOD;
   }
 
   _setState(next) {
@@ -43,6 +49,9 @@ export class Monster {
   }
 
   update(dt, player) {
+    if (this.graceTimer > 0) this.graceTimer -= dt;
+    const graceActive = this.graceTimer > 0;
+
     const myCell = worldToCell(this.pos.x, this.pos.z);
     const playerCell = worldToCell(player.pos.x, player.pos.z);
 
@@ -50,16 +59,24 @@ export class Monster {
     const cellDist = Math.hypot(playerCell.x - myCell.x, playerCell.z - myCell.z);
 
     const seesPlayer =
-      cellDist <= SIGHT_RANGE && hasLineOfSight(myCell.x, myCell.z, playerCell.x, playerCell.z);
-    const hearsPlayer = dist2D <= player.noiseRadius && player.isRunning;
+      !graceActive && cellDist <= SIGHT_RANGE && hasLineOfSight(myCell.x, myCell.z, playerCell.x, playerCell.z);
+    const hearsPlayer = !graceActive && dist2D <= player.noiseRadius && player.isRunning;
 
     if (seesPlayer || hearsPlayer) {
-      this._setState("hunt");
+      if (this.state === "patrol" || this.state === "search") {
+        this._setState("noticing");
+        this.noticeTimer = NOTICE_DURATION;
+      }
       this.lastKnownCell = playerCell;
       this.searchTimer = 0;
-    } else if (this.state === "hunt") {
+    } else if (this.state === "hunt" || this.state === "noticing") {
       this._setState("search");
       this.searchTimer = SEARCH_TIMEOUT;
+    }
+
+    if (this.state === "noticing") {
+      this.noticeTimer -= dt;
+      if (this.noticeTimer <= 0) this._setState("hunt");
     }
 
     if (this.state === "search") {
@@ -67,42 +84,70 @@ export class Monster {
       if (this.searchTimer <= 0) this._setState("patrol");
     }
 
-    // Repath periodically rather than every frame.
-    this.repathTimer -= dt;
-    if (this.repathTimer <= 0 || this.path.length === 0) {
-      this.repathTimer = REPATH_INTERVAL;
-      let goal = null;
-      if (this.state === "hunt" || this.state === "search") goal = this.lastKnownCell;
-      else {
-        if (!this._patrolTarget || Math.random() < 0.02) this._patrolTarget = this._pickPatrolTarget();
-        goal = this._patrolTarget;
+    if (this.state === "noticing") {
+      // Frozen reaction beat - no movement, just the (more frantic, via
+      // _animate) idle jitter, so the player gets a moment to notice it's
+      // noticed them before it commits to the chase.
+    } else {
+      // Repath periodically rather than every frame. This is the only
+      // source of movement - it always stays on the walkable grid, so it
+      // can never clip through a wall the way free-form steering toward a
+      // live target could.
+      this.repathTimer -= dt;
+      if (this.repathTimer <= 0 || this.path.length === 0) {
+        this.repathTimer = REPATH_INTERVAL;
+        let goal = null;
+        if (this.state === "hunt" || this.state === "search") goal = this.lastKnownCell;
+        else {
+          if (!this._patrolTarget || Math.random() < 0.02) this._patrolTarget = this._pickPatrolTarget();
+          goal = this._patrolTarget;
+        }
+        if (goal) {
+          this.path = findPath(myCell.x, myCell.z, goal.x, goal.z);
+          if (this.path.length === 0 && this.state === "patrol") this._patrolTarget = null;
+        }
       }
-      if (goal) {
-        this.path = findPath(myCell.x, myCell.z, goal.x, goal.z);
-        if (this.path.length === 0 && this.state === "patrol") this._patrolTarget = null;
-      }
-    }
 
-    const speed = this.state === "hunt" ? HUNT_SPEED : PATROL_SPEED;
-    if (this.path.length > 0) {
-      const next = this.path[0];
-      const target = cellToWorld(next.x, next.z);
-      const dx = target.x - this.pos.x;
-      const dz = target.z - this.pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d < 0.15) {
-        this.path.shift();
-      } else {
-        this.pos.x += (dx / d) * speed * dt;
-        this.pos.z += (dz / d) * speed * dt;
-        this.mesh.rotation.y = Math.atan2(dx, dz);
+      const speed = this.state === "hunt" ? HUNT_SPEED : PATROL_SPEED;
+      if (this.path.length > 0) {
+        const next = this.path[0];
+        const target = cellToWorld(next.x, next.z);
+        const dx = target.x - this.pos.x;
+        const dz = target.z - this.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 0.15) {
+          this.path.shift();
+        } else {
+          this.pos.x += (dx / d) * speed * dt;
+          this.pos.z += (dz / d) * speed * dt;
+          this.mesh.rotation.y = Math.atan2(dx, dz);
+        }
+      } else if (this.state === "hunt" && seesPlayer && myCell.x === playerCell.x && myCell.z === playerCell.z) {
+        // Path is exhausted and it's arrived at the player's cell, but
+        // findPath resolves to cell centers, which can leave it up to
+        // half a cell short of their actual position. Closing that last
+        // bit directly is safe here specifically because both occupy the
+        // same open cell - there is by definition no wall between them.
+        const dx = player.pos.x - this.pos.x;
+        const dz = player.pos.z - this.pos.z;
+        const d = Math.hypot(dx, dz);
+        if (d > 0.02) {
+          this.pos.x += (dx / d) * HUNT_SPEED * dt;
+          this.pos.z += (dz / d) * HUNT_SPEED * dt;
+          this.mesh.rotation.y = Math.atan2(dx, dz);
+        }
       }
     }
 
     this.mesh.position.set(this.pos.x, 0, this.pos.z);
     this._animate(dt);
 
-    if (dist2D <= CATCH_DISTANCE && this.onCatch) {
+    // Only an active, deliberate pursuit can catch the player - incidental
+    // proximity while it's just patrolling/searching (e.g. it happens to
+    // wander into the same cell without ever noticing them) should not be
+    // a death sentence.
+    const canCatch = this.state === "hunt" || this.state === "noticing";
+    if (canCatch && dist2D <= CATCH_DISTANCE && this.onCatch) {
       this.onCatch();
     }
 
@@ -114,9 +159,10 @@ export class Monster {
   // work here than the geometry itself.
   _animate(dt) {
     this.age += dt;
-    const frantic = this.state === "hunt";
-    const amp = frantic ? 0.09 : 0.035;
-    const speed = frantic ? 9 : 2.4;
+    const noticing = this.state === "noticing";
+    const frantic = this.state === "hunt" || noticing;
+    const amp = noticing ? 0.16 : frantic ? 0.09 : 0.035;
+    const speed = noticing ? 14 : frantic ? 9 : 2.4;
     const t = this.age * speed + this.jitterSeed;
 
     const rig = this.rig;

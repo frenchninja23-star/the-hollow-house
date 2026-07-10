@@ -147,8 +147,12 @@ function gameOver() {
 monster.onCatch = gameOver;
 
 monster.onStateChange = (next) => {
+  if (next === "noticing") {
+    audio.playOneShot("static", { volume: 0.9, pitch: 1.4 });
+  }
   if (next === "hunt" && !state.chaseActive) {
     state.chaseActive = true;
+    audio.playOneShot(Math.random() < 0.5 ? "roar1" : "roar2", { volume: 1 });
     audio.startChaseMusic();
   } else if (next !== "hunt" && state.chaseActive) {
     state.chaseActive = false;
