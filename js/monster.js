@@ -22,8 +22,7 @@ const AGGRO_MAX = 100;
 const AGGRO_DECAY_PER_SEC = 6;
 const AGGRO_HEARING_WALK_PER_SEC = 6;
 const AGGRO_HEARING_RUN_PER_SEC = 16;
-const AGGRO_SIGHT_DARK_PER_SEC = 3; // visible, flashlight off - mostly hideable
-const AGGRO_SIGHT_LIT_PER_SEC = 24; // visible, flashlight on - lit up and obvious
+const AGGRO_SIGHT_LIT_PER_SEC = 24; // visible AND flashlight on - lit up and obvious
 const AGGRO_TOUCH_SPIKE = 80;
 const AGGRO_SUSPICIOUS_ENTER = 25;
 const AGGRO_SUSPICIOUS_EXIT = 12; // hysteresis so it doesn't flicker at the boundary
@@ -79,22 +78,26 @@ export class Monster {
       !graceActive && cellDist <= SIGHT_RANGE && hasLineOfSight(myCell.x, myCell.z, playerCell.x, playerCell.z);
     const hearsPlayer = !graceActive && player.isMoving && dist2D <= player.noiseRadius;
     const touching = dist2D <= CATCH_DISTANCE;
+    // Sight only feeds aggro (and blocks decay) with the flashlight on -
+    // a glimpse of a silhouette in the dark, with no other rate to fall
+    // back on, previously still had *some* nonzero accumulation rate,
+    // which meant standing still and silent in the dark was never truly
+    // safe - given enough real time it always eventually crossed the
+    // hunt threshold anyway. Flashlight off now means genuinely
+    // undetectable by sight, full stop; only sound and touch remain.
+    const visuallyDetected = seesPlayer && player.flashlightOn;
 
     // --- Aggro: accumulates from hearing/sight/touch, decays otherwise.
-    // Flashlight is the big lever - lit up, being seen is dangerous;
-    // dark, a glimpse barely registers, so staying quiet and killing the
-    // light is a real way to lose its interest.
     if (!graceActive) {
       if (touching) this.aggro = Math.min(AGGRO_MAX, this.aggro + AGGRO_TOUCH_SPIKE);
-      if (seesPlayer) {
-        const rate = player.flashlightOn ? AGGRO_SIGHT_LIT_PER_SEC : AGGRO_SIGHT_DARK_PER_SEC;
-        this.aggro = Math.min(AGGRO_MAX, this.aggro + rate * dt);
+      if (visuallyDetected) {
+        this.aggro = Math.min(AGGRO_MAX, this.aggro + AGGRO_SIGHT_LIT_PER_SEC * dt);
       }
       if (hearsPlayer) {
         const rate = player.isRunning ? AGGRO_HEARING_RUN_PER_SEC : AGGRO_HEARING_WALK_PER_SEC;
         this.aggro = Math.min(AGGRO_MAX, this.aggro + rate * dt);
       }
-      if (!touching && !seesPlayer && !hearsPlayer) {
+      if (!touching && !visuallyDetected && !hearsPlayer) {
         this.aggro = Math.max(0, this.aggro - AGGRO_DECAY_PER_SEC * dt);
       }
     }
@@ -139,14 +142,30 @@ export class Monster {
       if (this.repathTimer <= 0 || this.path.length === 0) {
         this.repathTimer = REPATH_INTERVAL;
         let goal = null;
-        if (this.state === "hunt" || this.state === "suspicious") goal = this.lastKnownCell;
-        else {
+        if (this.state === "hunt") {
+          goal = this.lastKnownCell;
+        } else if (this.state === "suspicious") {
+          // Once it's arrived at the last place it heard/saw something
+          // and isn't actively tracking anymore, keep searching nearby
+          // instead of freezing in place at that one cell forever - which
+          // otherwise reads as it just camping right next to a hiding
+          // player rather than actually looking for them.
+          const arrived =
+            this.lastKnownCell && myCell.x === this.lastKnownCell.x && myCell.z === this.lastKnownCell.z;
+          const activelyTracking = seesPlayer || hearsPlayer || touching;
+          if (this.lastKnownCell && !(arrived && !activelyTracking)) {
+            goal = this.lastKnownCell;
+          } else {
+            if (!this._patrolTarget || Math.random() < 0.05) this._patrolTarget = this._pickPatrolTarget();
+            goal = this._patrolTarget;
+          }
+        } else {
           if (!this._patrolTarget || Math.random() < 0.02) this._patrolTarget = this._pickPatrolTarget();
           goal = this._patrolTarget;
         }
         if (goal) {
           this.path = findPath(myCell.x, myCell.z, goal.x, goal.z);
-          if (this.path.length === 0 && this.state === "patrol") this._patrolTarget = null;
+          if (this.path.length === 0 && this.state !== "hunt") this._patrolTarget = null;
         }
       }
 
