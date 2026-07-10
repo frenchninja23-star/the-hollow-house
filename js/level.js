@@ -20,20 +20,35 @@ export const ROOMS = [
 ];
 const SPINE = { x: 0, z: 7, w: 20, d: 1 };
 
-// Clutter cells that break up sightlines and open floor space. Kept sparse
-// and off the room's spine-facing edge so connectivity always holds.
+// Clutter cells that break up sightlines and open floor space - kept off
+// the room's spine-facing edge (so a room is never fully sealed) and away
+// from spawn/item/monster-spawn cells. Connectivity is re-verified by a
+// standalone BFS check after every edit to this list, not assumed.
 const OBSTACLES = [
+  // Entrance Hall
+  { x: 4, z: 2 },
+  { x: 1, z: 6 },
+  // Living Room
   { x: 9, z: 3 },
+  { x: 11, z: 5 },
+  // Kitchen
   { x: 16, z: 2 },
   { x: 17, z: 5 },
+  { x: 18, z: 3 },
+  // Bathroom
+  { x: 3, z: 9 },
+  // Bedroom
   { x: 8, z: 9 },
   { x: 10, z: 11 },
+  { x: 11, z: 8 },
+  // Study
   { x: 16, z: 9 },
+  { x: 15, z: 10 },
 ];
 
 export const DOOR_CELL = { x: 2, z: 1 };
 export const SPAWN_CELL = { x: 2, z: 4 };
-export const MONSTER_SPAWN_CELL = { x: 16, z: 9 };
+export const MONSTER_SPAWN_CELL = { x: 18, z: 8 };
 
 // One item per non-entrance room.
 export const ITEM_ROOMS = [1, 2, 3, 4, 5];
@@ -130,17 +145,36 @@ export function hasLineOfSight(x0, z0, x1, z1) {
   return true;
 }
 
+// Deterministic pseudo-random in [0,1) from a cell coordinate, so obstacle
+// variety is stable across reloads without needing to store anything.
+function cellRandom(x, z, salt) {
+  const n = Math.sin(x * 127.1 + z * 311.7 + salt * 74.3) * 43758.5453;
+  return n - Math.floor(n);
+}
+
 export function buildLevelMeshes(scene) {
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x2a2620, roughness: 0.95 });
   const doorWallMat = new THREE.MeshStandardMaterial({ color: 0x4a2020, roughness: 0.9 });
-  const obstacleMat = new THREE.MeshStandardMaterial({ color: 0x1c1712, roughness: 1 });
+  const crateMat = new THREE.MeshStandardMaterial({ color: 0x1c1712, roughness: 1 });
+  const shelfMat = new THREE.MeshStandardMaterial({ color: 0x171310, roughness: 0.95 });
   const floorMat = new THREE.MeshStandardMaterial({ color: 0x14110d, roughness: 1 });
   const ceilMat = new THREE.MeshStandardMaterial({ color: 0x0a0908, roughness: 1 });
 
   const wallGeo = new THREE.BoxGeometry(CELL, WALL_HEIGHT, CELL);
-  const obstacleHeight = WALL_HEIGHT * 0.5;
-  const obstacleGeo = new THREE.BoxGeometry(CELL * 0.85, obstacleHeight, CELL * 0.85);
   let doorMesh = null;
+
+  // A small library of furniture-like shapes so clutter doesn't read as a
+  // grid of identical crates. Picked deterministically per cell.
+  const crateGeo = new THREE.BoxGeometry(CELL * 0.8, WALL_HEIGHT * 0.42, CELL * 0.8);
+  const tableGeo = new THREE.BoxGeometry(CELL * 0.75, WALL_HEIGHT * 0.28, CELL * 0.5);
+  const shelfGeo = new THREE.BoxGeometry(CELL * 0.5, WALL_HEIGHT * 0.85, CELL * 0.35);
+  const barrelGeo = new THREE.CylinderGeometry(CELL * 0.28, CELL * 0.32, WALL_HEIGHT * 0.5, 10);
+  const variants = [
+    { geo: crateGeo, mat: crateMat, h: WALL_HEIGHT * 0.42 },
+    { geo: tableGeo, mat: shelfMat, h: WALL_HEIGHT * 0.28 },
+    { geo: shelfGeo, mat: shelfMat, h: WALL_HEIGHT * 0.85 },
+    { geo: barrelGeo, mat: crateMat, h: WALL_HEIGHT * 0.5 },
+  ];
 
   for (let z = 0; z < GRID_H; z++) {
     for (let x = 0; x < GRID_W; x++) {
@@ -154,8 +188,12 @@ export function buildLevelMeshes(scene) {
         doorMesh.position.set(x * CELL + CELL / 2, WALL_HEIGHT / 2, z * CELL + CELL / 2);
         scene.add(doorMesh);
       } else if (v === 3) {
-        const mesh = new THREE.Mesh(obstacleGeo, obstacleMat);
-        mesh.position.set(x * CELL + CELL / 2, obstacleHeight / 2, z * CELL + CELL / 2);
+        const variant = variants[Math.floor(cellRandom(x, z, 1) * variants.length)];
+        const mesh = new THREE.Mesh(variant.geo, variant.mat);
+        const jitterX = (cellRandom(x, z, 2) - 0.5) * CELL * 0.15;
+        const jitterZ = (cellRandom(x, z, 3) - 0.5) * CELL * 0.15;
+        mesh.position.set(x * CELL + CELL / 2 + jitterX, variant.h / 2, z * CELL + CELL / 2 + jitterZ);
+        mesh.rotation.y = cellRandom(x, z, 4) * Math.PI * 2;
         scene.add(mesh);
       }
     }

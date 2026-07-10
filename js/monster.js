@@ -134,28 +134,113 @@ export class Monster {
   }
 }
 
-function makeSegment(length, thickness, mat) {
+// Tapered, faceted cylinder rather than a box - reads as an emaciated limb
+// or bone instead of a stacked block. Low radial segment count (6) keeps
+// it faceted/angular rather than a smooth, friendly-looking tube.
+function makeSegment(length, radiusTop, radiusBottom, mat) {
   const group = new THREE.Group();
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(thickness, length, thickness), mat);
+  const geo = new THREE.CylinderGeometry(radiusTop, radiusBottom, length, 6);
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.position.y = -length / 2;
   group.add(mesh);
   return group;
 }
 
+function makeJoint(radius, mat) {
+  return new THREE.Mesh(new THREE.IcosahedronGeometry(radius, 0), mat);
+}
+
+function makeClawHand(mat) {
+  const wrist = new THREE.Group();
+  const palm = new THREE.Mesh(new THREE.IcosahedronGeometry(0.045, 0), mat);
+  wrist.add(palm);
+  const clawGeo = new THREE.ConeGeometry(0.018, 0.16, 5);
+  const spread = [
+    { rx: 0.3, ry: -0.3, rz: 0 },
+    { rx: 0.45, ry: 0, rz: 0 },
+    { rx: 0.3, ry: 0.35, rz: 0 },
+  ];
+  for (const s of spread) {
+    const claw = new THREE.Mesh(clawGeo, mat);
+    claw.position.y = -0.08;
+    const pivot = new THREE.Group();
+    pivot.rotation.set(s.rx, s.ry, s.rz);
+    pivot.add(claw);
+    wrist.add(pivot);
+  }
+  return wrist;
+}
+
+// Procedural mottled skin - generated once and shared by every instance,
+// so an actual creature material exists instead of a flat solid color.
+let sharedSkinTexture = null;
+function getSkinTexture() {
+  if (sharedSkinTexture) return sharedSkinTexture;
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+
+  ctx.fillStyle = "#332c26";
+  ctx.fillRect(0, 0, size, size);
+
+  for (let i = 0; i < 90; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = 3 + Math.random() * 16;
+    const dark = Math.random() < 0.6;
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, dark ? "#1c1712" : "#4a4038");
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.strokeStyle = "rgba(100,15,15,0.4)";
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 50; i++) {
+    let x = Math.random() * size;
+    let y = Math.random() * size;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    for (let j = 0; j < 4; j++) {
+      x += (Math.random() - 0.5) * 22;
+      y += (Math.random() - 0.5) * 22;
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  sharedSkinTexture = new THREE.CanvasTexture(canvas);
+  sharedSkinTexture.wrapS = THREE.RepeatWrapping;
+  sharedSkinTexture.wrapT = THREE.RepeatWrapping;
+  return sharedSkinTexture;
+}
+
 function buildMonsterMesh(monster) {
   const group = new THREE.Group();
-  const skin = new THREE.MeshStandardMaterial({ color: 0x0a080b, roughness: 0.4, metalness: 0.15 });
+  const skin = new THREE.MeshStandardMaterial({
+    map: getSkinTexture(),
+    color: 0x8a8a8a,
+    roughness: 0.62,
+    metalness: 0.04,
+  });
+  const jointMat = new THREE.MeshStandardMaterial({ color: 0x241f1a, roughness: 0.5 });
 
   const hips = new THREE.Group();
   hips.position.y = 0.95;
   group.add(hips);
 
   // Spine leans forward into a hunch rather than standing upright - reads
-  // as "wrong" without needing detailed geometry.
+  // as "wrong" without needing detailed geometry. Gaunt ribcage tapers
+  // narrower toward the shoulders instead of a uniform block.
   const spine = new THREE.Group();
   spine.rotation.x = 0.4;
   hips.add(spine);
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.85, 0.3), skin);
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.19, 0.85, 7), skin);
   torso.position.y = 0.42;
   spine.add(torso);
 
@@ -164,70 +249,92 @@ function buildMonsterMesh(monster) {
   chest.rotation.x = -0.25;
   spine.add(chest);
 
-  const neck = new THREE.Group();
-  neck.position.y = 0.15;
+  const neck = makeSegment(0.22, 0.05, 0.08, skin);
+  neck.position.y = 0.02;
   neck.rotation.x = 0.55;
   chest.add(neck);
 
   const head = new THREE.Group();
-  head.position.y = 0.22;
+  head.position.y = 0.28;
   head.rotation.z = 0.14; // cocked to one side - small but effective
   neck.add(head);
-  const headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.32, 0.24), skin);
-  headMesh.position.y = 0.14;
+  // Faceted, elongated skull rather than a smooth sphere or a box - the
+  // low-poly icosahedron catches light in irregular, unsettling planes.
+  const headMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.16, 1), skin);
+  headMesh.scale.set(0.8, 1.35, 0.78);
+  headMesh.position.y = 0.16;
   head.add(headMesh);
 
-  // Asymmetric eyes - deliberately not a neat matched pair.
+  // Asymmetric eyes - deliberately not a neat matched pair, no other
+  // facial detail so the eyes read as the only thing looking back at you.
   const eyeMat = new THREE.MeshBasicMaterial({ color: 0x8a0000 });
-  const leftEye = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.03, 0.02), eyeMat);
-  leftEye.position.set(-0.075, 0.16, 0.13);
+  const leftEye = new THREE.Mesh(new THREE.SphereGeometry(0.028, 6, 6), eyeMat);
+  leftEye.position.set(-0.075, 0.18, 0.15);
   head.add(leftEye);
-  const rightEye = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.02, 0.02), eyeMat);
-  rightEye.position.set(0.08, 0.12, 0.13);
+  const rightEye = new THREE.Mesh(new THREE.SphereGeometry(0.018, 6, 6), eyeMat);
+  rightEye.position.set(0.085, 0.13, 0.15);
   head.add(rightEye);
 
   // Arms - grotesquely long, hanging well past where knees would be, bent
-  // at unnatural, mismatched angles left vs right.
+  // at unnatural, mismatched angles left vs right, ending in clawed hands.
   const shoulderL = new THREE.Group();
   shoulderL.position.set(-0.24, 0.75, 0);
   spine.add(shoulderL);
-  const upperArmL = makeSegment(0.62, 0.1, skin);
+  shoulderL.add(makeJoint(0.07, jointMat));
+  const upperArmL = makeSegment(0.62, 0.06, 0.085, skin);
   upperArmL.rotation.x = 0.2;
   upperArmL.rotation.z = -0.1;
   shoulderL.add(upperArmL);
-  const forearmL = makeSegment(0.68, 0.085, skin);
+  const elbowL = makeJoint(0.05, jointMat);
+  elbowL.position.y = -0.62;
+  upperArmL.add(elbowL);
+  const forearmL = makeSegment(0.68, 0.035, 0.06, skin);
   forearmL.position.y = -0.62;
   forearmL.rotation.x = 0.15;
   upperArmL.add(forearmL);
+  const handL = makeClawHand(jointMat);
+  handL.position.y = -0.68;
+  forearmL.add(handL);
 
   const shoulderR = new THREE.Group();
   shoulderR.position.set(0.24, 0.75, 0);
   spine.add(shoulderR);
-  const upperArmR = makeSegment(0.6, 0.1, skin);
+  shoulderR.add(makeJoint(0.07, jointMat));
+  const upperArmR = makeSegment(0.6, 0.06, 0.085, skin);
   upperArmR.rotation.x = 0.55;
   upperArmR.rotation.z = 0.15;
   shoulderR.add(upperArmR);
-  const forearmR = makeSegment(0.66, 0.085, skin);
+  const elbowR = makeJoint(0.05, jointMat);
+  elbowR.position.y = -0.6;
+  upperArmR.add(elbowR);
+  const forearmR = makeSegment(0.66, 0.035, 0.06, skin);
   forearmR.position.y = -0.6;
   forearmR.rotation.x = -1.1; // bends the "wrong" way - uncanny asymmetry
   upperArmR.add(forearmR);
+  const handR = makeClawHand(jointMat);
+  handR.position.y = -0.66;
+  forearmR.add(handR);
 
-  // Legs - slightly crouched, digitigrade-ish stance.
-  const legGeo = () => {
+  // Legs - slightly crouched, digitigrade-ish stance, tapering to thin
+  // ankles rather than blocky shins.
+  const buildLeg = () => {
     const g = new THREE.Group();
-    const upper = makeSegment(0.5, 0.14, skin);
+    const upper = makeSegment(0.5, 0.08, 0.13, skin);
     upper.rotation.x = 0.3;
     g.add(upper);
-    const lower = makeSegment(0.55, 0.11, skin);
+    const knee = makeJoint(0.055, jointMat);
+    knee.position.y = -0.5;
+    upper.add(knee);
+    const lower = makeSegment(0.55, 0.045, 0.09, skin);
     lower.position.y = -0.5;
     lower.rotation.x = -0.55;
     upper.add(lower);
     return g;
   };
-  const legL = legGeo();
+  const legL = buildLeg();
   legL.position.set(-0.14, 0.95, 0);
   group.add(legL);
-  const legR = legGeo();
+  const legR = buildLeg();
   legR.position.set(0.14, 0.95, 0);
   group.add(legR);
 
