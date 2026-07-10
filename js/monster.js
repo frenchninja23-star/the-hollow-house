@@ -64,45 +64,52 @@ export class Monster {
     };
   }
 
-  update(dt, player) {
+  // players: array of one or two {pos, isMoving, isRunning, flashlightOn,
+  // noiseRadius} - in co-op it tracks whichever player is currently most
+  // exposed (loudest or most visible) rather than summing every player's
+  // contribution, so being in a party doesn't make detection unfairly
+  // faster just from both of you existing near it at once.
+  update(dt, players) {
     if (this.graceTimer > 0) this.graceTimer -= dt;
     const graceActive = this.graceTimer > 0;
 
     const myCell = worldToCell(this.pos.x, this.pos.z);
-    const playerCell = worldToCell(player.pos.x, player.pos.z);
+    const evals = players.map((player) => this._evaluateDetection(player, myCell, graceActive));
 
-    const dist2D = Math.hypot(player.pos.x - this.pos.x, player.pos.z - this.pos.z);
-    const cellDist = Math.hypot(playerCell.x - myCell.x, playerCell.z - myCell.z);
-
-    const seesPlayer =
-      !graceActive && cellDist <= SIGHT_RANGE && hasLineOfSight(myCell.x, myCell.z, playerCell.x, playerCell.z);
-    const hearsPlayer = !graceActive && player.isMoving && dist2D <= player.noiseRadius;
-    const touching = dist2D <= CATCH_DISTANCE;
-    // Sight only feeds aggro (and blocks decay) with the flashlight on -
-    // a glimpse of a silhouette in the dark, with no other rate to fall
-    // back on, previously still had *some* nonzero accumulation rate,
-    // which meant standing still and silent in the dark was never truly
-    // safe - given enough real time it always eventually crossed the
-    // hunt threshold anyway. Flashlight off now means genuinely
-    // undetectable by sight, full stop; only sound and touch remain.
-    const visuallyDetected = seesPlayer && player.flashlightOn;
+    const anyTouching = evals.some((e) => e.touching);
+    const maxRate = Math.max(0, ...evals.map((e) => e.rate));
 
     // --- Aggro: accumulates from hearing/sight/touch, decays otherwise.
     if (!graceActive) {
-      if (touching) this.aggro = Math.min(AGGRO_MAX, this.aggro + AGGRO_TOUCH_SPIKE);
-      if (visuallyDetected) {
-        this.aggro = Math.min(AGGRO_MAX, this.aggro + AGGRO_SIGHT_LIT_PER_SEC * dt);
-      }
-      if (hearsPlayer) {
-        const rate = player.isRunning ? AGGRO_HEARING_RUN_PER_SEC : AGGRO_HEARING_WALK_PER_SEC;
-        this.aggro = Math.min(AGGRO_MAX, this.aggro + rate * dt);
-      }
-      if (!touching && !visuallyDetected && !hearsPlayer) {
+      if (anyTouching) this.aggro = Math.min(AGGRO_MAX, this.aggro + AGGRO_TOUCH_SPIKE);
+      if (maxRate > 0) {
+        this.aggro = Math.min(AGGRO_MAX, this.aggro + maxRate * dt);
+      } else if (!anyTouching) {
         this.aggro = Math.max(0, this.aggro - AGGRO_DECAY_PER_SEC * dt);
       }
     }
 
-    if (seesPlayer || hearsPlayer || touching) this.lastKnownCell = playerCell;
+    // Whoever is currently most exposed becomes the pursuit target -
+    // touching beats any passive detection, then higher rate, then closer.
+    let target = null;
+    for (const e of evals) {
+      if (!e.touching && !e.seesPlayer && !e.hearsPlayer) continue;
+      if (
+        !target ||
+        (e.touching && !target.touching) ||
+        (e.touching === target.touching && e.rate > target.rate) ||
+        (e.touching === target.touching && e.rate === target.rate && e.dist2D < target.dist2D)
+      ) {
+        target = e;
+      }
+    }
+    if (target) this.lastKnownCell = target.playerCell;
+
+    // dist2D of the closest currently-relevant player, mostly useful for
+    // solo mode and debugging - each client computes its own local
+    // distance to the monster for its own heartbeat feedback rather than
+    // relying on this in multiplayer.
+    const dist2D = Math.min(...evals.map((e) => e.dist2D));
 
     // --- State follows the aggro meter, with hysteresis at each boundary
     // so it doesn't flicker back and forth right at a threshold.
@@ -152,7 +159,7 @@ export class Monster {
           // player rather than actually looking for them.
           const arrived =
             this.lastKnownCell && myCell.x === this.lastKnownCell.x && myCell.z === this.lastKnownCell.z;
-          const activelyTracking = seesPlayer || hearsPlayer || touching;
+          const activelyTracking = target !== null;
           if (this.lastKnownCell && !(arrived && !activelyTracking)) {
             goal = this.lastKnownCell;
           } else {
@@ -172,9 +179,9 @@ export class Monster {
       const speed = this.state === "hunt" ? HUNT_SPEED : this.state === "suspicious" ? ALERT_SPEED : PATROL_SPEED;
       if (this.path.length > 0) {
         const next = this.path[0];
-        const target = cellToWorld(next.x, next.z);
-        const dx = target.x - this.pos.x;
-        const dz = target.z - this.pos.z;
+        const waypoint = cellToWorld(next.x, next.z);
+        const dx = waypoint.x - this.pos.x;
+        const dz = waypoint.z - this.pos.z;
         const d = Math.hypot(dx, dz);
         if (d < 0.15) {
           this.path.shift();
@@ -183,14 +190,20 @@ export class Monster {
           this.pos.z += (dz / d) * speed * dt;
           this.mesh.rotation.y = Math.atan2(dx, dz);
         }
-      } else if (this.state === "hunt" && seesPlayer && myCell.x === playerCell.x && myCell.z === playerCell.z) {
-        // Path is exhausted and it's arrived at the player's cell, but
+      } else if (
+        this.state === "hunt" &&
+        target &&
+        target.seesPlayer &&
+        myCell.x === target.playerCell.x &&
+        myCell.z === target.playerCell.z
+      ) {
+        // Path is exhausted and it's arrived at the target's cell, but
         // findPath resolves to cell centers, which can leave it up to
         // half a cell short of their actual position. Closing that last
         // bit directly is safe here specifically because both occupy the
         // same open cell - there is by definition no wall between them.
-        const dx = player.pos.x - this.pos.x;
-        const dz = player.pos.z - this.pos.z;
+        const dx = target.player.pos.x - this.pos.x;
+        const dz = target.player.pos.z - this.pos.z;
         const d = Math.hypot(dx, dz);
         if (d > 0.02) {
           this.pos.x += (dx / d) * HUNT_SPEED * dt;
@@ -204,15 +217,51 @@ export class Monster {
     this._animate(dt);
 
     // Only an active, deliberate pursuit (or a touch spike that just
-    // pushed it straight into that pursuit this same frame) can catch the
+    // pushed it straight into that pursuit this same frame) can catch a
     // player - incidental proximity while it's just patrolling should not
     // be a death sentence.
     const canCatch = this.state === "hunt" || this.state === "noticing";
-    if (canCatch && touching && this.onCatch) {
+    if (canCatch && anyTouching && this.onCatch) {
       this.onCatch();
     }
 
     return { dist2D, state: this.state, aggro: this.aggro };
+  }
+
+  _evaluateDetection(player, myCell, graceActive) {
+    const playerCell = worldToCell(player.pos.x, player.pos.z);
+    const dist2D = Math.hypot(player.pos.x - this.pos.x, player.pos.z - this.pos.z);
+    const cellDist = Math.hypot(playerCell.x - myCell.x, playerCell.z - myCell.z);
+
+    const seesPlayer =
+      !graceActive && cellDist <= SIGHT_RANGE && hasLineOfSight(myCell.x, myCell.z, playerCell.x, playerCell.z);
+    const hearsPlayer = !graceActive && player.isMoving && dist2D <= player.noiseRadius;
+    const touching = dist2D <= CATCH_DISTANCE;
+    const visuallyDetected = seesPlayer && player.flashlightOn;
+
+    let rate = 0;
+    if (visuallyDetected) rate = AGGRO_SIGHT_LIT_PER_SEC;
+    if (hearsPlayer) {
+      rate = Math.max(rate, player.isRunning ? AGGRO_HEARING_RUN_PER_SEC : AGGRO_HEARING_WALK_PER_SEC);
+    }
+
+    return { player, playerCell, dist2D, cellDist, seesPlayer, hearsPlayer, touching, visuallyDetected, rate };
+  }
+
+  // Guest-side puppeting: rather than running the simulation locally
+  // (which would require the guest to independently reconstruct aggro
+  // from network-relayed player states and could drift from the host's
+  // authoritative result), just drive the mesh directly from the host's
+  // broadcast transform and state. Reuses the same mesh/animation code so
+  // it looks identical to the locally-simulated version.
+  applyNetworkState(x, z, rotationY, state, aggro, dt) {
+    this.pos.x = x;
+    this.pos.z = z;
+    this.mesh.position.set(x, 0, z);
+    this.mesh.rotation.y = rotationY;
+    this.state = state;
+    this.aggro = aggro;
+    this._animate(dt);
   }
 
   // Small continuous per-frame noise on top of the rig's rest pose - the

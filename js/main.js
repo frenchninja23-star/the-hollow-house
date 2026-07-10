@@ -3,6 +3,8 @@ import { buildLevelMeshes, cellToWorld, worldToCell, ITEM_CELLS, SPAWN_CELL, MON
 import { Player } from "./player.js";
 import { Monster } from "./monster.js";
 import { AudioManager } from "./audio.js";
+import { Network } from "./network.js";
+import { RemotePlayer } from "./remoteplayer.js";
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000000, 0.026);
@@ -55,15 +57,28 @@ for (const cell of ITEM_CELLS) {
 }
 
 const monster = new Monster(scene, MONSTER_SPAWN_CELL);
+const remotePlayer = new RemotePlayer(scene);
 
 const audio = new AudioManager();
 let audioReady = false;
+
+// mode: "solo" | "host" | "guest". Host runs the authoritative simulation
+// (monster AI, item pickups, door/win) and broadcasts it; guest runs its
+// own local player fully client-side for responsiveness and renders
+// everything else from the host's snapshots.
+let mode = "solo";
+const network = new Network();
+let remoteConnected = false;
+let remoteState = null; // guest's live state, as known by the host
+let latestSnapshot = null; // host's authoritative world state, as known by the guest
 
 const state = {
   collected: 0,
   total: ITEM_CELLS.length,
   playing: false,
   chaseActive: false,
+  gameOverFired: false,
+  winFired: false,
 };
 
 // ---- HUD ----
@@ -71,8 +86,11 @@ const staminaBar = document.getElementById("stamina-fill");
 const batteryBar = document.getElementById("battery-fill");
 const itemCounter = document.getElementById("item-counter");
 const objectiveText = document.getElementById("objective-text");
+const partyScreen = document.getElementById("party-screen");
 const startScreen = document.getElementById("start-screen");
+const waitingScreen = document.getElementById("waiting-screen");
 const gameOverScreen = document.getElementById("gameover-screen");
+const gameOverHeading = document.getElementById("gameover-heading");
 const winScreen = document.getElementById("win-screen");
 const jumpscareFlash = document.getElementById("jumpscare-flash");
 const pickupToast = document.getElementById("pickup-toast");
@@ -100,9 +118,126 @@ async function beginGame() {
   if (player.isTouch) document.getElementById("touch-controls").classList.remove("hidden");
 }
 
-document.getElementById("start-btn").addEventListener("click", beginGame);
+// ---- Party lobby ----
+const partyChoice = document.getElementById("party-choice");
+const hostPanel = document.getElementById("host-panel");
+const joinPanel = document.getElementById("join-panel");
+const codeDisplay = document.getElementById("party-code-display");
+const hostStatus = document.getElementById("host-status");
+const hostStartBtn = document.getElementById("host-start-btn");
+const joinCodeInput = document.getElementById("join-code-input");
+const joinSubmitBtn = document.getElementById("join-submit-btn");
+const joinStatus = document.getElementById("join-status");
+const waitingText = document.getElementById("waiting-text");
+
+document.getElementById("solo-btn").addEventListener("click", () => {
+  mode = "solo";
+  partyScreen.classList.add("hidden");
+  startScreen.classList.remove("hidden");
+});
+
+document.getElementById("host-btn").addEventListener("click", async () => {
+  mode = "host";
+  partyChoice.classList.add("hidden");
+  hostPanel.classList.remove("hidden");
+  hostStatus.textContent = "Setting up...";
+  try {
+    const code = await network.hostParty();
+    codeDisplay.textContent = code;
+    hostStatus.textContent = "Waiting for a friend to join...";
+  } catch {
+    hostStatus.textContent = "Couldn't create a party - check your connection and try again.";
+  }
+});
+
+document.getElementById("join-btn").addEventListener("click", () => {
+  mode = "guest";
+  partyChoice.classList.add("hidden");
+  joinPanel.classList.remove("hidden");
+  joinCodeInput.focus();
+});
+
+async function submitJoin() {
+  const code = joinCodeInput.value.trim().toUpperCase();
+  if (code.length !== 4) {
+    joinStatus.textContent = "Enter the 4-character code.";
+    return;
+  }
+  joinSubmitBtn.disabled = true;
+  joinStatus.textContent = "Connecting...";
+  try {
+    await network.joinParty(code);
+    joinStatus.textContent = "";
+    partyScreen.classList.add("hidden");
+    waitingText.textContent = "Connected! Waiting for the host to start...";
+    waitingScreen.classList.remove("hidden");
+  } catch {
+    joinStatus.textContent = "Couldn't find that party - check the code and try again.";
+  } finally {
+    joinSubmitBtn.disabled = false;
+  }
+}
+joinSubmitBtn.addEventListener("click", submitJoin);
+joinCodeInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitJoin();
+});
+joinCodeInput.addEventListener("input", () => {
+  joinCodeInput.value = joinCodeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+});
+
+for (const id of ["party-back-btn-1", "party-back-btn-2"]) {
+  document.getElementById(id).addEventListener("click", () => {
+    network.destroy();
+    mode = "solo";
+    hostPanel.classList.add("hidden");
+    joinPanel.classList.add("hidden");
+    partyChoice.classList.remove("hidden");
+  });
+}
+
+hostStartBtn.addEventListener("click", () => {
+  network.send({ t: "start" });
+  partyScreen.classList.add("hidden");
+  beginGame();
+});
+
+network.onPeerConnected = () => {
+  if (mode === "host") {
+    hostStatus.textContent = "Friend connected!";
+    hostStartBtn.classList.remove("hidden");
+  }
+};
+
+network.onPeerDisconnected = () => {
+  remoteConnected = false;
+  if (mode === "guest" && state.playing && !state.gameOverFired && !state.winFired) {
+    state.gameOverFired = true;
+    state.playing = false;
+    gameOverHeading.textContent = "Connection Lost";
+    gameOverScreen.classList.remove("hidden");
+  } else if (mode === "host" && state.playing) {
+    showPickupToast("Your friend disconnected.");
+  }
+};
+
+network.onMessage = (data) => {
+  if (mode === "host" && data.t === "input") {
+    remoteState = data;
+    remoteConnected = true;
+  } else if (mode === "guest") {
+    if (data.t === "start") {
+      waitingScreen.classList.add("hidden");
+      gameOverHeading.textContent = "You Were Caught";
+      beginGame();
+    } else if (data.t === "snapshot") {
+      latestSnapshot = data;
+    }
+  }
+};
+
 document.getElementById("restart-btn-death").addEventListener("click", () => window.location.reload());
 document.getElementById("restart-btn-win").addEventListener("click", () => window.location.reload());
+document.getElementById("start-btn").addEventListener("click", beginGame);
 
 const flashlightBtn = document.getElementById("flashlight-btn");
 if (flashlightBtn) {
@@ -142,7 +277,9 @@ function jumpscare(onDone) {
 function gameOver() {
   if (!state.playing) return;
   state.playing = false;
+  state.gameOverFired = true;
   jumpscare(() => gameOverScreen.classList.remove("hidden"));
+  if (mode === "host") sendSnapshot();
 }
 monster.onCatch = gameOver;
 
@@ -163,10 +300,32 @@ monster.onStateChange = (next) => {
 function win() {
   if (!state.playing) return;
   state.playing = false;
+  state.winFired = true;
   winScreen.classList.remove("hidden");
+  if (mode === "host") sendSnapshot();
+}
+
+function sendSnapshot() {
+  network.send({
+    t: "snapshot",
+    hostPos: { x: player.pos.x, y: player.pos.y, z: player.pos.z },
+    hostYaw: player.yaw,
+    monster: { x: monster.pos.x, z: monster.pos.z, rotY: monster.mesh.rotation.y, state: monster.state, aggro: monster.aggro },
+    collected: itemMeshes.map((m) => m.userData.collected),
+    doorOpen: state.collected >= state.total,
+    gameOver: state.gameOverFired,
+    win: state.winFired,
+  });
+}
+
+function animateItem(mesh, dt) {
+  mesh.rotation.y += dt * 1.4;
+  mesh.position.y = 1.1 + Math.sin(performance.now() * 0.002 + mesh.id) * 0.08;
 }
 
 const clock = new THREE.Clock();
+const NET_INTERVAL = 0.05; // 20Hz - frequent enough to feel responsive, cheap enough not to matter
+let netTimer = 0;
 
 function tick() {
   requestAnimationFrame(tick);
@@ -174,36 +333,118 @@ function tick() {
 
   if (state.playing) {
     player.update(dt);
+    remotePlayer.checkStale();
+    netTimer += dt;
+    const sendNow = netTimer >= NET_INTERVAL;
+    if (sendNow) netTimer = 0;
 
-    for (const mesh of itemMeshes) {
-      if (mesh.userData.collected) continue;
-      mesh.rotation.y += dt * 1.4;
-      mesh.position.y = 1.1 + Math.sin(performance.now() * 0.002 + mesh.id) * 0.08;
-      const d = Math.hypot(mesh.position.x - player.pos.x, mesh.position.z - player.pos.z);
-      if (d < 1.0) {
-        mesh.userData.collected = true;
-        scene.remove(mesh);
-        state.collected++;
-        itemCounter.textContent = `${state.collected} / ${state.total}`;
-        showPickupToast(`Found a photograph - ${mesh.userData.roomName}`);
-        updateObjectiveText();
-        if (state.collected >= state.total) openDoor();
+    if (mode === "guest") {
+      for (const mesh of itemMeshes) {
+        if (!mesh.userData.collected) animateItem(mesh, dt);
       }
+
+      if (sendNow) {
+        network.send({
+          t: "input",
+          pos: { x: player.pos.x, y: player.pos.y, z: player.pos.z },
+          yaw: player.yaw,
+          isMoving: player.isMoving,
+          isRunning: player.isRunning,
+          flashlightOn: player.flashlightOn,
+          noiseRadius: player.noiseRadius,
+        });
+      }
+
+      if (latestSnapshot) {
+        const m = latestSnapshot.monster;
+        monster.applyNetworkState(m.x, m.z, m.rotY, m.state, m.aggro, dt);
+        remotePlayer.updateFromState(latestSnapshot.hostPos.x, latestSnapshot.hostPos.z, latestSnapshot.hostYaw);
+
+        let collectedCount = 0;
+        latestSnapshot.collected.forEach((isCollected, i) => {
+          const mesh = itemMeshes[i];
+          if (isCollected) {
+            collectedCount++;
+            if (!mesh.userData.collected) {
+              mesh.userData.collected = true;
+              scene.remove(mesh);
+            }
+          }
+        });
+        if (collectedCount !== state.collected) {
+          state.collected = collectedCount;
+          itemCounter.textContent = `${state.collected} / ${state.total}`;
+          updateObjectiveText();
+        }
+        if (latestSnapshot.doorOpen) openDoor();
+        if (latestSnapshot.gameOver && !state.gameOverFired) {
+          state.gameOverFired = true;
+          gameOver();
+        }
+        if (latestSnapshot.win && !state.winFired) {
+          state.winFired = true;
+          win();
+        }
+
+        const localDist = Math.hypot(m.x - player.pos.x, m.z - player.pos.z);
+        const aggroT = m.aggro / 100;
+        const proximity = 1 - Math.min(localDist, 22) / 22;
+        audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
+      }
+    } else {
+      // Solo or host: authoritative simulation.
+      for (const mesh of itemMeshes) {
+        if (mesh.userData.collected) continue;
+        animateItem(mesh, dt);
+        const dHost = Math.hypot(mesh.position.x - player.pos.x, mesh.position.z - player.pos.z);
+        const dGuest = remoteConnected
+          ? Math.hypot(mesh.position.x - remoteState.pos.x, mesh.position.z - remoteState.pos.z)
+          : Infinity;
+        if (Math.min(dHost, dGuest) < 1.0) {
+          mesh.userData.collected = true;
+          scene.remove(mesh);
+          state.collected++;
+          itemCounter.textContent = `${state.collected} / ${state.total}`;
+          showPickupToast(`Found a photograph - ${mesh.userData.roomName}`);
+          updateObjectiveText();
+          if (state.collected >= state.total) openDoor();
+        }
+      }
+
+      const hostCell = worldToCell(player.pos.x, player.pos.z);
+      const atDoor =
+        hostCell.x === DOOR_CELL.x && hostCell.z === DOOR_CELL.z
+          ? true
+          : remoteConnected &&
+            (() => {
+              const gc = worldToCell(remoteState.pos.x, remoteState.pos.z);
+              return gc.x === DOOR_CELL.x && gc.z === DOOR_CELL.z;
+            })();
+      if (state.collected >= state.total && atDoor) win();
+
+      const players = [player];
+      if (remoteConnected) {
+        players.push({
+          pos: remoteState.pos,
+          isMoving: remoteState.isMoving,
+          isRunning: remoteState.isRunning,
+          flashlightOn: remoteState.flashlightOn,
+          noiseRadius: remoteState.noiseRadius,
+        });
+      }
+      const result = monster.update(dt, players);
+
+      const aggroT = result.aggro / 100;
+      const localDist = Math.hypot(monster.pos.x - player.pos.x, monster.pos.z - player.pos.z);
+      const proximity = 1 - Math.min(localDist, 22) / 22;
+      audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
+
+      if (remoteConnected) {
+        remotePlayer.updateFromState(remoteState.pos.x, remoteState.pos.z, remoteState.yaw);
+      }
+
+      if (mode === "host" && sendNow) sendSnapshot();
     }
-
-    const playerCell = worldToCell(player.pos.x, player.pos.z);
-    if (state.collected >= state.total && playerCell.x === DOOR_CELL.x && playerCell.z === DOOR_CELL.z) {
-      win();
-    }
-
-    const result = monster.update(dt, player);
-
-    // The aggro meter itself isn't shown anywhere - this is how the player
-    // actually feels it rising and falling, including as it decays back
-    // down when they've successfully broken contact.
-    const aggroT = result.aggro / 100;
-    const proximity = 1 - Math.min(result.dist2D, 22) / 22;
-    audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
 
     flashlight.intensity = player.flashlightOn ? 100 : 0;
     staminaBar.style.width = `${player.stamina * 100}%`;
@@ -215,5 +456,26 @@ function tick() {
 tick();
 
 if (window.__EXPOSE_TEST_HOOKS__) {
-  window.__test = { state, win, gameOver, player, monster, itemMeshes };
+  window.__test = {
+    state,
+    win,
+    gameOver,
+    player,
+    monster,
+    itemMeshes,
+    network,
+    remotePlayer,
+    get mode() {
+      return mode;
+    },
+    get remoteState() {
+      return remoteState;
+    },
+    get remoteConnected() {
+      return remoteConnected;
+    },
+    get latestSnapshot() {
+      return latestSnapshot;
+    },
+  };
 }

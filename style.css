@@ -129,6 +129,46 @@ html, body {
 }
 .screen button:hover { background: rgba(207, 199, 184, 0.12); }
 
+#party-choice { display: flex; flex-direction: column; gap: 10px; margin-top: 22px; }
+#party-choice button { margin-top: 0; min-width: 220px; }
+
+.party-panel { display: flex; flex-direction: column; align-items: center; margin-top: 22px; }
+.party-panel.hidden { display: none; }
+
+#party-code-display {
+  font-size: 48px;
+  letter-spacing: 10px;
+  font-weight: bold;
+  color: #d9c27a;
+  margin: 14px 0;
+  text-shadow: 0 0 18px rgba(217, 194, 122, 0.35);
+}
+
+#join-code-input {
+  margin-top: 8px;
+  padding: 10px 14px;
+  font-size: 22px;
+  letter-spacing: 6px;
+  text-align: center;
+  text-transform: uppercase;
+  width: 140px;
+  font-family: inherit;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(207, 199, 184, 0.5);
+  color: #cfc7b8;
+}
+#join-code-input:focus { outline: none; border-color: #d9c27a; }
+
+.screen button.link-btn {
+  margin-top: 14px;
+  padding: 4px 10px;
+  border: none;
+  font-size: 12px;
+  opacity: 0.55;
+  text-decoration: underline;
+}
+.screen button.link-btn:hover { background: none; opacity: 0.85; }
+
 #touch-controls.hidden { display: none; }
 #touch-controls button {
   position: fixed;

@@ -33,7 +33,34 @@
 
   <div id="jumpscare-flash"></div>
 
-  <div id="start-screen" class="screen">
+  <div id="party-screen" class="screen">
+    <h1>The Hollow House</h1>
+    <p>Play alone, or with one other person.</p>
+
+    <div id="party-choice">
+      <button id="solo-btn">Play Solo</button>
+      <button id="host-btn">Host a Party</button>
+      <button id="join-btn">Join a Party</button>
+    </div>
+
+    <div id="host-panel" class="party-panel hidden">
+      <p class="small">Give this code to your friend:</p>
+      <div id="party-code-display">----</div>
+      <p class="small" id="host-status">Setting up...</p>
+      <button id="host-start-btn" class="hidden">Start Game</button>
+      <button id="party-back-btn-1" class="link-btn">Back</button>
+    </div>
+
+    <div id="join-panel" class="party-panel hidden">
+      <p class="small">Enter your friend's code:</p>
+      <input id="join-code-input" maxlength="4" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="CODE" />
+      <button id="join-submit-btn">Join</button>
+      <p class="small" id="join-status"></p>
+      <button id="party-back-btn-2" class="link-btn">Back</button>
+    </div>
+  </div>
+
+  <div id="start-screen" class="screen hidden">
     <h1>The Hollow House</h1>
     <p>Find 5 photographs hidden through the house, then escape through the front door.</p>
     <p class="small">You are not alone in here. It hunts by sight and by sound - running is fast but loud.
@@ -43,8 +70,13 @@
     <button id="start-btn">Enter the House</button>
   </div>
 
+  <div id="waiting-screen" class="screen hidden">
+    <h1>The Hollow House</h1>
+    <p id="waiting-text">Waiting for the host to start...</p>
+  </div>
+
   <div id="gameover-screen" class="screen hidden">
-    <h1 class="death">You Were Caught</h1>
+    <h1 class="death" id="gameover-heading">You Were Caught</h1>
     <button id="restart-btn-death">Try Again</button>
   </div>
 
@@ -53,6 +85,7 @@
     <button id="restart-btn-win">Play Again</button>
   </div>
 
+  <script src="vendor/peerjs.min.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>
 </html>
