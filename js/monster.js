@@ -3,16 +3,32 @@ import { findPath } from "./pathfinding.js";
 import { cellToWorld, worldToCell, hasLineOfSight, ROOMS } from "./level.js";
 
 const PATROL_SPEED = 2.0;
+const ALERT_SPEED = 2.8; // investigating a noise/sighting - cautious, not yet all-out
 const HUNT_SPEED = 4.3;
 // The house's rooms are only connected by one long, fully unobstructed
 // corridor - at longer sight ranges that corridor turns into a near
 // guaranteed instant-detection trap the moment both happen to be in it.
-const SIGHT_RANGE = 5; // cells
+const SIGHT_RANGE = 6; // cells
 const REPATH_INTERVAL = 0.5;
-const SEARCH_TIMEOUT = 8; // seconds of searching before giving up
 const CATCH_DISTANCE = 0.9;
 const NOTICE_DURATION = 0.5; // freeze-and-react beat before it commits to the chase
 const GRACE_PERIOD = 25; // seconds of safety after game start to get oriented
+
+// A continuous 0-100 aggro meter instead of a hard on/off switch - this is
+// what actually lets a player de-escalate an encounter (go quiet, kill the
+// flashlight, break line of sight) instead of being stuck in a fixed-length
+// hunt/search timer once spotted once.
+const AGGRO_MAX = 100;
+const AGGRO_DECAY_PER_SEC = 6;
+const AGGRO_HEARING_WALK_PER_SEC = 6;
+const AGGRO_HEARING_RUN_PER_SEC = 16;
+const AGGRO_SIGHT_DARK_PER_SEC = 3; // visible, flashlight off - mostly hideable
+const AGGRO_SIGHT_LIT_PER_SEC = 24; // visible, flashlight on - lit up and obvious
+const AGGRO_TOUCH_SPIKE = 80;
+const AGGRO_SUSPICIOUS_ENTER = 25;
+const AGGRO_SUSPICIOUS_EXIT = 12; // hysteresis so it doesn't flicker at the boundary
+const AGGRO_HUNT_ENTER = 70;
+const AGGRO_HUNT_EXIT = 45;
 
 export class Monster {
   constructor(scene, spawnCell) {
@@ -32,6 +48,7 @@ export class Monster {
     this.jitterSeed = Math.random() * 1000;
     this.age = 0;
     this.graceTimer = GRACE_PERIOD;
+    this.aggro = 0;
   }
 
   _setState(next) {
@@ -60,28 +77,53 @@ export class Monster {
 
     const seesPlayer =
       !graceActive && cellDist <= SIGHT_RANGE && hasLineOfSight(myCell.x, myCell.z, playerCell.x, playerCell.z);
-    const hearsPlayer = !graceActive && dist2D <= player.noiseRadius && player.isRunning;
+    const hearsPlayer = !graceActive && player.isMoving && dist2D <= player.noiseRadius;
+    const touching = dist2D <= CATCH_DISTANCE;
 
-    if (seesPlayer || hearsPlayer) {
-      if (this.state === "patrol" || this.state === "search") {
+    // --- Aggro: accumulates from hearing/sight/touch, decays otherwise.
+    // Flashlight is the big lever - lit up, being seen is dangerous;
+    // dark, a glimpse barely registers, so staying quiet and killing the
+    // light is a real way to lose its interest.
+    if (!graceActive) {
+      if (touching) this.aggro = Math.min(AGGRO_MAX, this.aggro + AGGRO_TOUCH_SPIKE);
+      if (seesPlayer) {
+        const rate = player.flashlightOn ? AGGRO_SIGHT_LIT_PER_SEC : AGGRO_SIGHT_DARK_PER_SEC;
+        this.aggro = Math.min(AGGRO_MAX, this.aggro + rate * dt);
+      }
+      if (hearsPlayer) {
+        const rate = player.isRunning ? AGGRO_HEARING_RUN_PER_SEC : AGGRO_HEARING_WALK_PER_SEC;
+        this.aggro = Math.min(AGGRO_MAX, this.aggro + rate * dt);
+      }
+      if (!touching && !seesPlayer && !hearsPlayer) {
+        this.aggro = Math.max(0, this.aggro - AGGRO_DECAY_PER_SEC * dt);
+      }
+    }
+
+    if (seesPlayer || hearsPlayer || touching) this.lastKnownCell = playerCell;
+
+    // --- State follows the aggro meter, with hysteresis at each boundary
+    // so it doesn't flicker back and forth right at a threshold.
+    if (this.state === "hunt") {
+      if (this.aggro < AGGRO_HUNT_EXIT) this._setState("suspicious");
+    } else if (this.state === "suspicious") {
+      if (this.aggro >= AGGRO_HUNT_ENTER) {
         this._setState("noticing");
         this.noticeTimer = NOTICE_DURATION;
+      } else if (this.aggro < AGGRO_SUSPICIOUS_EXIT) {
+        this._setState("patrol");
       }
-      this.lastKnownCell = playerCell;
-      this.searchTimer = 0;
-    } else if (this.state === "hunt" || this.state === "noticing") {
-      this._setState("search");
-      this.searchTimer = SEARCH_TIMEOUT;
+    } else if (this.state === "patrol") {
+      if (this.aggro >= AGGRO_HUNT_ENTER) {
+        this._setState("noticing");
+        this.noticeTimer = NOTICE_DURATION;
+      } else if (this.aggro >= AGGRO_SUSPICIOUS_ENTER) {
+        this._setState("suspicious");
+      }
     }
 
     if (this.state === "noticing") {
       this.noticeTimer -= dt;
       if (this.noticeTimer <= 0) this._setState("hunt");
-    }
-
-    if (this.state === "search") {
-      this.searchTimer -= dt;
-      if (this.searchTimer <= 0) this._setState("patrol");
     }
 
     if (this.state === "noticing") {
@@ -97,7 +139,7 @@ export class Monster {
       if (this.repathTimer <= 0 || this.path.length === 0) {
         this.repathTimer = REPATH_INTERVAL;
         let goal = null;
-        if (this.state === "hunt" || this.state === "search") goal = this.lastKnownCell;
+        if (this.state === "hunt" || this.state === "suspicious") goal = this.lastKnownCell;
         else {
           if (!this._patrolTarget || Math.random() < 0.02) this._patrolTarget = this._pickPatrolTarget();
           goal = this._patrolTarget;
@@ -108,7 +150,7 @@ export class Monster {
         }
       }
 
-      const speed = this.state === "hunt" ? HUNT_SPEED : PATROL_SPEED;
+      const speed = this.state === "hunt" ? HUNT_SPEED : this.state === "suspicious" ? ALERT_SPEED : PATROL_SPEED;
       if (this.path.length > 0) {
         const next = this.path[0];
         const target = cellToWorld(next.x, next.z);
@@ -142,16 +184,16 @@ export class Monster {
     this.mesh.position.set(this.pos.x, 0, this.pos.z);
     this._animate(dt);
 
-    // Only an active, deliberate pursuit can catch the player - incidental
-    // proximity while it's just patrolling/searching (e.g. it happens to
-    // wander into the same cell without ever noticing them) should not be
-    // a death sentence.
+    // Only an active, deliberate pursuit (or a touch spike that just
+    // pushed it straight into that pursuit this same frame) can catch the
+    // player - incidental proximity while it's just patrolling should not
+    // be a death sentence.
     const canCatch = this.state === "hunt" || this.state === "noticing";
-    if (canCatch && dist2D <= CATCH_DISTANCE && this.onCatch) {
+    if (canCatch && touching && this.onCatch) {
       this.onCatch();
     }
 
-    return { dist2D, state: this.state };
+    return { dist2D, state: this.state, aggro: this.aggro };
   }
 
   // Small continuous per-frame noise on top of the rig's rest pose - the
@@ -159,10 +201,20 @@ export class Monster {
   // work here than the geometry itself.
   _animate(dt) {
     this.age += dt;
-    const noticing = this.state === "noticing";
-    const frantic = this.state === "hunt" || noticing;
-    const amp = noticing ? 0.16 : frantic ? 0.09 : 0.035;
-    const speed = noticing ? 14 : frantic ? 9 : 2.4;
+    let amp, speed;
+    if (this.state === "noticing") {
+      amp = 0.16;
+      speed = 14;
+    } else if (this.state === "hunt") {
+      amp = 0.09;
+      speed = 9;
+    } else if (this.state === "suspicious") {
+      amp = 0.06;
+      speed = 5;
+    } else {
+      amp = 0.035;
+      speed = 2.4;
+    }
     const t = this.age * speed + this.jitterSeed;
 
     const rig = this.rig;

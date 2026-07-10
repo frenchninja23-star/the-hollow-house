@@ -198,9 +198,12 @@ function tick() {
 
     const result = monster.update(dt, player);
 
+    // The aggro meter itself isn't shown anywhere - this is how the player
+    // actually feels it rising and falling, including as it decays back
+    // down when they've successfully broken contact.
+    const aggroT = result.aggro / 100;
     const proximity = 1 - Math.min(result.dist2D, 22) / 22;
-    const panicBoost = result.state === "hunt" ? 0.35 : 0;
-    audio.setHeartbeatIntensity(Math.min(1, proximity * 0.8 + panicBoost));
+    audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
 
     flashlight.intensity = player.flashlightOn ? 100 : 0;
     staminaBar.style.width = `${player.stamina * 100}%`;

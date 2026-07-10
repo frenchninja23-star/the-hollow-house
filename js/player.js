@@ -18,6 +18,7 @@ export class Player {
     this.flashlightBattery = 1; // 0..1
     this.flashlightOn = true;
     this.isRunning = false;
+    this.isMoving = false;
     this.locked = false;
     this.isTouch = "ontouchstart" in window;
     this.touchRunHeld = false;
@@ -143,6 +144,7 @@ export class Player {
 
     const wantsRun = this.isTouch ? this.touchRunHeld : this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
     const moving = moveX !== 0 || moveZ !== 0;
+    this.isMoving = moving;
     this.isRunning = moving && wantsRun && this.stamina > 0.05;
 
     const speed = this.isRunning ? RUN_SPEED : WALK_SPEED;
@@ -181,6 +183,9 @@ export class Player {
   }
 
   get noiseRadius() {
-    return this.isRunning ? 9 : 3.5;
+    // Walking radius needs to be large enough to actually carry through a
+    // nearby wall sometimes - at the old 3.5 it never exceeded this
+    // level's wall thickness, so "heard but not seen" could never happen.
+    return this.isRunning ? 9 : 5;
   }
 }
