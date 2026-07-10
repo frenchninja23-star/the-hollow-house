@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>The Hollow House</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="crosshair"></div>
+
+  <div id="hud">
+    <div class="objective" id="objective-text"></div>
+    <div class="counter">Photographs: <span id="item-counter">0 / 5</span></div>
+    <div class="bar-row">
+      <span class="bar-label">Stamina</span>
+      <div class="bar"><div class="bar-fill" id="stamina-fill"></div></div>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">Battery</span>
+      <div class="bar"><div class="bar-fill battery" id="battery-fill"></div></div>
+    </div>
+  </div>
+
+  <div id="pickup-toast"></div>
+
+  <div id="touch-controls" class="hidden">
+    <button id="flashlight-btn">Flashlight</button>
+    <button id="run-btn">Run</button>
+  </div>
+
+  <div id="jumpscare-flash"></div>
+
+  <div id="start-screen" class="screen">
+    <h1>The Hollow House</h1>
+    <p>Find 5 photographs hidden through the house, then escape through the front door.</p>
+    <p class="small">You are not alone in here. It hunts by sight and by sound - running is fast but loud.
+      Your flashlight helps you see, but its battery is limited. Use it wisely.</p>
+    <p class="small desktop-only">WASD to move, mouse to look, Shift to run, F for flashlight. Click to start.</p>
+    <p class="small touch-only">Left side: move. Right side: look. Use the on-screen buttons for flashlight and running.</p>
+    <button id="start-btn">Enter the House</button>
+  </div>
+
+  <div id="gameover-screen" class="screen hidden">
+    <h1 class="death">You Were Caught</h1>
+    <button id="restart-btn-death">Try Again</button>
+  </div>
+
+  <div id="win-screen" class="screen hidden">
+    <h1 class="win">You Escaped</h1>
+    <button id="restart-btn-win">Play Again</button>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
