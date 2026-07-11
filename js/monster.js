@@ -219,10 +219,15 @@ export class Monster {
     // Only an active, deliberate pursuit (or a touch spike that just
     // pushed it straight into that pursuit this same frame) can catch a
     // player - incidental proximity while it's just patrolling should not
-    // be a death sentence.
+    // be a death sentence. Report *which* player(s) by id rather than
+    // array position, since the caller may have already excluded an
+    // already-caught player from this array - a positional index would
+    // silently point at the wrong person once the array is no longer
+    // "everyone".
     const canCatch = this.state === "hunt" || this.state === "noticing";
     if (canCatch && anyTouching && this.onCatch) {
-      this.onCatch();
+      const caughtIds = evals.filter((e) => e.touching).map((e) => e.player.id);
+      this.onCatch(caughtIds);
     }
 
     return { dist2D, state: this.state, aggro: this.aggro };

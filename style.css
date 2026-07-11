@@ -11,10 +11,15 @@ html, body {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+  /* Belt-and-suspenders alongside the JS preventDefault() calls in
+     player.js - stops the browser from ever picking up move+look as a
+     pinch-zoom gesture in the first place. */
+  touch-action: none;
+  overscroll-behavior: none;
 }
 
 #app { position: fixed; inset: 0; }
-#app canvas { display: block; }
+#app canvas { display: block; touch-action: none; }
 
 #crosshair {
   position: fixed;

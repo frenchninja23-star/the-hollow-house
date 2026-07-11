@@ -55,9 +55,16 @@ export class Player {
     this.touchMove = { active: false, id: null, startX: 0, startY: 0, dx: 0, dy: 0 };
     this.touchLook = { active: false, id: null, lastX: 0, lastY: 0 };
 
+    // passive: false + preventDefault() everywhere here is deliberate -
+    // with passive listeners (the previous default), preventDefault() is
+    // a silent no-op, so nothing ever actually told Safari these two
+    // simultaneous touches (move + look) weren't a pinch-zoom gesture. It
+    // would zoom the page and occasionally trigger a back/close gesture
+    // from underneath the game entirely.
     window.addEventListener(
       "touchstart",
       (e) => {
+        e.preventDefault();
         for (const t of e.changedTouches) {
           if (t.clientX < window.innerWidth / 2 && !this.touchMove.active) {
             this.touchMove.active = true;
@@ -72,12 +79,13 @@ export class Player {
           }
         }
       },
-      { passive: true }
+      { passive: false }
     );
 
     window.addEventListener(
       "touchmove",
       (e) => {
+        e.preventDefault();
         for (const t of e.changedTouches) {
           if (this.touchMove.active && t.identifier === this.touchMove.id) {
             this.touchMove.dx = t.clientX - this.touchMove.startX;
@@ -93,19 +101,32 @@ export class Player {
           }
         }
       },
-      { passive: true }
+      { passive: false }
     );
 
-    window.addEventListener("touchend", (e) => {
-      for (const t of e.changedTouches) {
-        if (t.identifier === this.touchMove.id) {
-          this.touchMove.active = false;
-          this.touchMove.dx = 0;
-          this.touchMove.dy = 0;
+    window.addEventListener(
+      "touchend",
+      (e) => {
+        e.preventDefault();
+        for (const t of e.changedTouches) {
+          if (t.identifier === this.touchMove.id) {
+            this.touchMove.active = false;
+            this.touchMove.dx = 0;
+            this.touchMove.dy = 0;
+          }
+          if (t.identifier === this.touchLook.id) this.touchLook.active = false;
         }
-        if (t.identifier === this.touchLook.id) this.touchLook.active = false;
-      }
-    });
+      },
+      { passive: false }
+    );
+
+    // Safari's proprietary pinch/rotate gesture events bypass normal
+    // touch handling entirely - block them directly as a second layer,
+    // since touch-action/preventDefault above doesn't reliably stop them
+    // on every iOS version.
+    document.addEventListener("gesturestart", (e) => e.preventDefault());
+    document.addEventListener("gesturechange", (e) => e.preventDefault());
+    document.addEventListener("gestureend", (e) => e.preventDefault());
   }
 
   toggleFlashlight() {

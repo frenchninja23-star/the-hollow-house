@@ -79,6 +79,14 @@ const state = {
   chaseActive: false,
   gameOverFired: false,
   winFired: false,
+  // Getting caught takes you out individually, not the whole party -
+  // hostCaught/guestCaught are host-authoritative; localCaught is each
+  // client's own read of "is it me specifically." The match only fully
+  // ends when every connected player is down (or someone reaches the
+  // door), handled in monster.onCatch and the snapshot flow below.
+  hostCaught: false,
+  guestCaught: false,
+  localCaught: false,
 };
 
 // ---- HUD ----
@@ -89,6 +97,7 @@ const objectiveText = document.getElementById("objective-text");
 const partyScreen = document.getElementById("party-screen");
 const startScreen = document.getElementById("start-screen");
 const waitingScreen = document.getElementById("waiting-screen");
+const caughtScreen = document.getElementById("caught-screen");
 const gameOverScreen = document.getElementById("gameover-screen");
 const gameOverHeading = document.getElementById("gameover-heading");
 const winScreen = document.getElementById("win-screen");
@@ -295,14 +304,48 @@ function jumpscare(onDone) {
   }, 900);
 }
 
+function showCaughtOverlay() {
+  jumpscare(() => caughtScreen.classList.remove("hidden"));
+}
+
 function gameOver() {
   if (!state.playing) return;
   state.playing = false;
   state.gameOverFired = true;
+  caughtScreen.classList.add("hidden");
   jumpscare(() => gameOverScreen.classList.remove("hidden"));
   if (mode === "host") sendSnapshot();
 }
-monster.onCatch = gameOver;
+
+// Getting caught takes only that one player out - the match keeps going
+// for whoever's left. It only ends in defeat once nobody is still in it
+// (solo mode is just the "no partner" case of this: remoteConnected is
+// always false, so hostStillIn/partnerStillIn resolves the same way it
+// always did).
+monster.onCatch = (caughtIds) => {
+  if (mode === "guest") return; // guest never runs monster.update() - defensive only
+
+  let newlyCaught = false;
+  if (caughtIds.includes("host") && !state.hostCaught) {
+    state.hostCaught = true;
+    state.localCaught = true;
+    newlyCaught = true;
+    showCaughtOverlay();
+  }
+  if (caughtIds.includes("guest") && !state.guestCaught) {
+    state.guestCaught = true;
+    newlyCaught = true;
+  }
+  if (!newlyCaught) return;
+
+  const partnerStillIn = remoteConnected && !state.guestCaught;
+  const hostStillIn = !state.hostCaught;
+  if (!hostStillIn && !partnerStillIn) {
+    gameOver();
+  } else if (mode === "host") {
+    sendSnapshot();
+  }
+};
 
 monster.onStateChange = (next) => {
   if (next === "noticing") {
@@ -322,6 +365,7 @@ function win() {
   if (!state.playing) return;
   state.playing = false;
   state.winFired = true;
+  caughtScreen.classList.add("hidden");
   winScreen.classList.remove("hidden");
   if (mode === "host") sendSnapshot();
 }
@@ -334,6 +378,8 @@ function sendSnapshot() {
     monster: { x: monster.pos.x, z: monster.pos.z, rotY: monster.mesh.rotation.y, state: monster.state, aggro: monster.aggro },
     collected: itemMeshes.map((m) => m.userData.collected),
     doorOpen: state.collected >= state.total,
+    hostCaught: state.hostCaught,
+    guestCaught: state.guestCaught,
     gameOver: state.gameOverFired,
     win: state.winFired,
   });
@@ -358,7 +404,9 @@ function tick() {
   // dark and staying that way. Keep rendering alive regardless.
   try {
     if (state.playing) {
-      player.update(dt);
+      // Caught players are frozen in place, not removed from the scene -
+      // the match keeps running around them for whoever's still in it.
+      if (!state.localCaught) player.update(dt);
       remotePlayer.checkStale();
       netTimer += dt;
       const sendNow = netTimer >= NET_INTERVAL;
@@ -403,6 +451,10 @@ function tick() {
             updateObjectiveText();
           }
           if (latestSnapshot.doorOpen) openDoor();
+          if (latestSnapshot.guestCaught && !state.localCaught) {
+            state.localCaught = true;
+            showCaughtOverlay();
+          }
           if (latestSnapshot.gameOver && !state.gameOverFired) {
             state.gameOverFired = true;
             gameOver();
@@ -418,12 +470,16 @@ function tick() {
           audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
         }
       } else {
-        // Solo or host: authoritative simulation.
+        // Solo or host: authoritative simulation. A caught player can't
+        // reach items or the door anymore - they're frozen - so they're
+        // excluded from both checks below, not just the monster's view.
+        const guestActive = remoteConnected && !state.guestCaught;
+
         for (const mesh of itemMeshes) {
           if (mesh.userData.collected) continue;
           animateItem(mesh, dt);
-          const dHost = Math.hypot(mesh.position.x - player.pos.x, mesh.position.z - player.pos.z);
-          const dGuest = remoteConnected
+          const dHost = state.hostCaught ? Infinity : Math.hypot(mesh.position.x - player.pos.x, mesh.position.z - player.pos.z);
+          const dGuest = guestActive
             ? Math.hypot(mesh.position.x - remoteState.pos.x, mesh.position.z - remoteState.pos.z)
             : Infinity;
           if (Math.min(dHost, dGuest) < 1.0) {
@@ -437,20 +493,25 @@ function tick() {
           }
         }
 
-        const hostCell = worldToCell(player.pos.x, player.pos.z);
-        const atDoor =
-          hostCell.x === DOOR_CELL.x && hostCell.z === DOOR_CELL.z
-            ? true
-            : remoteConnected &&
-              (() => {
-                const gc = worldToCell(remoteState.pos.x, remoteState.pos.z);
-                return gc.x === DOOR_CELL.x && gc.z === DOOR_CELL.z;
-              })();
-        if (state.collected >= state.total && atDoor) win();
+        const hostAtDoor =
+          !state.hostCaught &&
+          (() => {
+            const c = worldToCell(player.pos.x, player.pos.z);
+            return c.x === DOOR_CELL.x && c.z === DOOR_CELL.z;
+          })();
+        const guestAtDoor =
+          guestActive &&
+          (() => {
+            const c = worldToCell(remoteState.pos.x, remoteState.pos.z);
+            return c.x === DOOR_CELL.x && c.z === DOOR_CELL.z;
+          })();
+        if (state.collected >= state.total && (hostAtDoor || guestAtDoor)) win();
 
-        const players = [player];
-        if (remoteConnected) {
+        const players = [];
+        if (!state.hostCaught) players.push({ id: "host", pos: player.pos, isMoving: player.isMoving, isRunning: player.isRunning, flashlightOn: player.flashlightOn, noiseRadius: player.noiseRadius });
+        if (guestActive) {
           players.push({
+            id: "guest",
             pos: remoteState.pos,
             isMoving: remoteState.isMoving,
             isRunning: remoteState.isRunning,
@@ -458,7 +519,7 @@ function tick() {
             noiseRadius: remoteState.noiseRadius,
           });
         }
-        const result = monster.update(dt, players);
+        const result = players.length > 0 ? monster.update(dt, players) : { aggro: monster.aggro, dist2D: Infinity, state: monster.state };
 
         const aggroT = result.aggro / 100;
         const localDist = Math.hypot(monster.pos.x - player.pos.x, monster.pos.z - player.pos.z);
