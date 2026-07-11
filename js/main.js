@@ -108,12 +108,33 @@ async function beginGame() {
   startScreen.classList.add("hidden");
   audio.createContext();
   audio.unlock();
+
+  // Audio setup must never be able to block the game from actually
+  // starting - a stalled or rejected fetch here (stricter mobile audio
+  // policies, a flaky connection while a WebRTC connection is also being
+  // negotiated, etc.) previously left state.playing false forever, which
+  // meant a permanently dark screen with no controls for the player who
+  // hit it, and - for a host - a game loop that never ran at all, so the
+  // guest never received a single snapshot: frozen monster, invisible
+  // host, uncollectable items, all from one stuck promise.
   if (!audioReady) {
-    await audio.loadSounds();
-    audioReady = true;
+    try {
+      await Promise.race([
+        audio.loadSounds(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("audio load timed out")), 8000)),
+      ]);
+      audioReady = true;
+    } catch (err) {
+      console.error("Audio failed to load in time - starting without sound.", err);
+    }
   }
-  audio.startAmbience();
-  audio.startHeartbeatLoop();
+  try {
+    audio.startAmbience();
+    audio.startHeartbeatLoop();
+  } catch (err) {
+    console.error("Failed to start ambience/heartbeat.", err);
+  }
+
   state.playing = true;
   if (player.isTouch) document.getElementById("touch-controls").classList.remove("hidden");
 }
@@ -331,124 +352,132 @@ function tick() {
   requestAnimationFrame(tick);
   const dt = Math.min(0.05, clock.getDelta());
 
-  if (state.playing) {
-    player.update(dt);
-    remotePlayer.checkStale();
-    netTimer += dt;
-    const sendNow = netTimer >= NET_INTERVAL;
-    if (sendNow) netTimer = 0;
+  // An uncaught error anywhere in here would otherwise skip
+  // renderer.render() for that frame - and every frame after it, since
+  // the same error tends to recur - which reads as the screen just going
+  // dark and staying that way. Keep rendering alive regardless.
+  try {
+    if (state.playing) {
+      player.update(dt);
+      remotePlayer.checkStale();
+      netTimer += dt;
+      const sendNow = netTimer >= NET_INTERVAL;
+      if (sendNow) netTimer = 0;
 
-    if (mode === "guest") {
-      for (const mesh of itemMeshes) {
-        if (!mesh.userData.collected) animateItem(mesh, dt);
-      }
+      if (mode === "guest") {
+        for (const mesh of itemMeshes) {
+          if (!mesh.userData.collected) animateItem(mesh, dt);
+        }
 
-      if (sendNow) {
-        network.send({
-          t: "input",
-          pos: { x: player.pos.x, y: player.pos.y, z: player.pos.z },
-          yaw: player.yaw,
-          isMoving: player.isMoving,
-          isRunning: player.isRunning,
-          flashlightOn: player.flashlightOn,
-          noiseRadius: player.noiseRadius,
-        });
-      }
+        if (sendNow) {
+          network.send({
+            t: "input",
+            pos: { x: player.pos.x, y: player.pos.y, z: player.pos.z },
+            yaw: player.yaw,
+            isMoving: player.isMoving,
+            isRunning: player.isRunning,
+            flashlightOn: player.flashlightOn,
+            noiseRadius: player.noiseRadius,
+          });
+        }
 
-      if (latestSnapshot) {
-        const m = latestSnapshot.monster;
-        monster.applyNetworkState(m.x, m.z, m.rotY, m.state, m.aggro, dt);
-        remotePlayer.updateFromState(latestSnapshot.hostPos.x, latestSnapshot.hostPos.z, latestSnapshot.hostYaw);
+        if (latestSnapshot) {
+          const m = latestSnapshot.monster;
+          monster.applyNetworkState(m.x, m.z, m.rotY, m.state, m.aggro, dt);
+          remotePlayer.updateFromState(latestSnapshot.hostPos.x, latestSnapshot.hostPos.z, latestSnapshot.hostYaw);
 
-        let collectedCount = 0;
-        latestSnapshot.collected.forEach((isCollected, i) => {
-          const mesh = itemMeshes[i];
-          if (isCollected) {
-            collectedCount++;
-            if (!mesh.userData.collected) {
-              mesh.userData.collected = true;
-              scene.remove(mesh);
+          let collectedCount = 0;
+          latestSnapshot.collected.forEach((isCollected, i) => {
+            const mesh = itemMeshes[i];
+            if (isCollected) {
+              collectedCount++;
+              if (!mesh.userData.collected) {
+                mesh.userData.collected = true;
+                scene.remove(mesh);
+              }
             }
+          });
+          if (collectedCount !== state.collected) {
+            state.collected = collectedCount;
+            itemCounter.textContent = `${state.collected} / ${state.total}`;
+            updateObjectiveText();
           }
-        });
-        if (collectedCount !== state.collected) {
-          state.collected = collectedCount;
-          itemCounter.textContent = `${state.collected} / ${state.total}`;
-          updateObjectiveText();
+          if (latestSnapshot.doorOpen) openDoor();
+          if (latestSnapshot.gameOver && !state.gameOverFired) {
+            state.gameOverFired = true;
+            gameOver();
+          }
+          if (latestSnapshot.win && !state.winFired) {
+            state.winFired = true;
+            win();
+          }
+
+          const localDist = Math.hypot(m.x - player.pos.x, m.z - player.pos.z);
+          const aggroT = m.aggro / 100;
+          const proximity = 1 - Math.min(localDist, 22) / 22;
+          audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
         }
-        if (latestSnapshot.doorOpen) openDoor();
-        if (latestSnapshot.gameOver && !state.gameOverFired) {
-          state.gameOverFired = true;
-          gameOver();
-        }
-        if (latestSnapshot.win && !state.winFired) {
-          state.winFired = true;
-          win();
+      } else {
+        // Solo or host: authoritative simulation.
+        for (const mesh of itemMeshes) {
+          if (mesh.userData.collected) continue;
+          animateItem(mesh, dt);
+          const dHost = Math.hypot(mesh.position.x - player.pos.x, mesh.position.z - player.pos.z);
+          const dGuest = remoteConnected
+            ? Math.hypot(mesh.position.x - remoteState.pos.x, mesh.position.z - remoteState.pos.z)
+            : Infinity;
+          if (Math.min(dHost, dGuest) < 1.0) {
+            mesh.userData.collected = true;
+            scene.remove(mesh);
+            state.collected++;
+            itemCounter.textContent = `${state.collected} / ${state.total}`;
+            showPickupToast(`Found a photograph - ${mesh.userData.roomName}`);
+            updateObjectiveText();
+            if (state.collected >= state.total) openDoor();
+          }
         }
 
-        const localDist = Math.hypot(m.x - player.pos.x, m.z - player.pos.z);
-        const aggroT = m.aggro / 100;
+        const hostCell = worldToCell(player.pos.x, player.pos.z);
+        const atDoor =
+          hostCell.x === DOOR_CELL.x && hostCell.z === DOOR_CELL.z
+            ? true
+            : remoteConnected &&
+              (() => {
+                const gc = worldToCell(remoteState.pos.x, remoteState.pos.z);
+                return gc.x === DOOR_CELL.x && gc.z === DOOR_CELL.z;
+              })();
+        if (state.collected >= state.total && atDoor) win();
+
+        const players = [player];
+        if (remoteConnected) {
+          players.push({
+            pos: remoteState.pos,
+            isMoving: remoteState.isMoving,
+            isRunning: remoteState.isRunning,
+            flashlightOn: remoteState.flashlightOn,
+            noiseRadius: remoteState.noiseRadius,
+          });
+        }
+        const result = monster.update(dt, players);
+
+        const aggroT = result.aggro / 100;
+        const localDist = Math.hypot(monster.pos.x - player.pos.x, monster.pos.z - player.pos.z);
         const proximity = 1 - Math.min(localDist, 22) / 22;
         audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
-      }
-    } else {
-      // Solo or host: authoritative simulation.
-      for (const mesh of itemMeshes) {
-        if (mesh.userData.collected) continue;
-        animateItem(mesh, dt);
-        const dHost = Math.hypot(mesh.position.x - player.pos.x, mesh.position.z - player.pos.z);
-        const dGuest = remoteConnected
-          ? Math.hypot(mesh.position.x - remoteState.pos.x, mesh.position.z - remoteState.pos.z)
-          : Infinity;
-        if (Math.min(dHost, dGuest) < 1.0) {
-          mesh.userData.collected = true;
-          scene.remove(mesh);
-          state.collected++;
-          itemCounter.textContent = `${state.collected} / ${state.total}`;
-          showPickupToast(`Found a photograph - ${mesh.userData.roomName}`);
-          updateObjectiveText();
-          if (state.collected >= state.total) openDoor();
+
+        if (remoteConnected) {
+          remotePlayer.updateFromState(remoteState.pos.x, remoteState.pos.z, remoteState.yaw);
         }
+
+        if (mode === "host" && sendNow) sendSnapshot();
       }
 
-      const hostCell = worldToCell(player.pos.x, player.pos.z);
-      const atDoor =
-        hostCell.x === DOOR_CELL.x && hostCell.z === DOOR_CELL.z
-          ? true
-          : remoteConnected &&
-            (() => {
-              const gc = worldToCell(remoteState.pos.x, remoteState.pos.z);
-              return gc.x === DOOR_CELL.x && gc.z === DOOR_CELL.z;
-            })();
-      if (state.collected >= state.total && atDoor) win();
-
-      const players = [player];
-      if (remoteConnected) {
-        players.push({
-          pos: remoteState.pos,
-          isMoving: remoteState.isMoving,
-          isRunning: remoteState.isRunning,
-          flashlightOn: remoteState.flashlightOn,
-          noiseRadius: remoteState.noiseRadius,
-        });
-      }
-      const result = monster.update(dt, players);
-
-      const aggroT = result.aggro / 100;
-      const localDist = Math.hypot(monster.pos.x - player.pos.x, monster.pos.z - player.pos.z);
-      const proximity = 1 - Math.min(localDist, 22) / 22;
-      audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
-
-      if (remoteConnected) {
-        remotePlayer.updateFromState(remoteState.pos.x, remoteState.pos.z, remoteState.yaw);
-      }
-
-      if (mode === "host" && sendNow) sendSnapshot();
+      flashlight.intensity = player.flashlightOn ? 100 : 0;
+      staminaBar.style.width = `${player.stamina * 100}%`;
+      batteryBar.style.width = `${player.flashlightBattery * 100}%`;
     }
-
-    flashlight.intensity = player.flashlightOn ? 100 : 0;
-    staminaBar.style.width = `${player.stamina * 100}%`;
-    batteryBar.style.width = `${player.flashlightBattery * 100}%`;
+  } catch (err) {
+    console.error("Frame update error:", err);
   }
 
   renderer.render(scene, camera);
