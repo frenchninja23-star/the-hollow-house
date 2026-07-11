@@ -55,15 +55,21 @@ export class Player {
     this.touchMove = { active: false, id: null, startX: 0, startY: 0, dx: 0, dy: 0 };
     this.touchLook = { active: false, id: null, lastX: 0, lastY: 0 };
 
-    // passive: false + preventDefault() everywhere here is deliberate -
-    // with passive listeners (the previous default), preventDefault() is
-    // a silent no-op, so nothing ever actually told Safari these two
-    // simultaneous touches (move + look) weren't a pinch-zoom gesture. It
-    // would zoom the page and occasionally trigger a back/close gesture
-    // from underneath the game entirely.
+    // passive: false + preventDefault() below is deliberate - with passive
+    // listeners (the previous default), preventDefault() is a silent
+    // no-op, so nothing ever actually told Safari two simultaneous
+    // touches (move + look) weren't a pinch-zoom gesture. But that same
+    // preventDefault() also swallows the synthetic click Safari
+    // generates after a tap - which is how buttons normally fire - so
+    // every touch is first checked against isGameTouch() and left
+    // completely alone (no preventDefault, no move/look tracking) if
+    // it's actually a tap on a button, input, or menu screen.
+    const isGameTouch = (e) => !(e.target && typeof e.target.closest === "function" && e.target.closest("button, input, .screen"));
+
     window.addEventListener(
       "touchstart",
       (e) => {
+        if (!isGameTouch(e)) return;
         e.preventDefault();
         for (const t of e.changedTouches) {
           if (t.clientX < window.innerWidth / 2 && !this.touchMove.active) {
@@ -85,6 +91,7 @@ export class Player {
     window.addEventListener(
       "touchmove",
       (e) => {
+        if (!isGameTouch(e)) return;
         e.preventDefault();
         for (const t of e.changedTouches) {
           if (this.touchMove.active && t.identifier === this.touchMove.id) {
@@ -107,6 +114,7 @@ export class Player {
     window.addEventListener(
       "touchend",
       (e) => {
+        if (!isGameTouch(e)) return;
         e.preventDefault();
         for (const t of e.changedTouches) {
           if (t.identifier === this.touchMove.id) {
