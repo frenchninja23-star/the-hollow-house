@@ -5,7 +5,9 @@ export class AudioManager {
     this.ctx = null;
     this.buffers = {};
     this.ambientSource = null;
-    this.heartbeatGain = null;
+    this.heartbeatActive = false;
+    this.heartbeatTimer = null;
+    this.heartbeatIntensity = 0;
     this.unlocked = false;
   }
 
@@ -76,24 +78,56 @@ export class AudioManager {
     this.ambientSource = src;
   }
 
+  // The heartbeat clip is a single ~0.77s pulse, not audio mastered for
+  // seamless looping - its start and end samples don't match, so
+  // AudioBufferSourceNode's raw loop=true produced an audible click at
+  // every repeat, and looping one beat back-to-back with no gap doesn't
+  // read as a heartbeat rhythm anyway. Retriggering it as discrete, freshly
+  // started one-shots with real silence between them - like an actual
+  // pulse - fixes both: no loop seam to click on, and the *rate* of beats
+  // (not just their pitch/volume) now carries the tension.
   startHeartbeatLoop() {
-    if (this.heartbeatSource) return;
+    if (this.heartbeatActive) return;
+    this.heartbeatActive = true;
+    this._scheduleNextHeartbeat();
+  }
+
+  stopHeartbeatLoop() {
+    this.heartbeatActive = false;
+    if (this.heartbeatTimer) {
+      clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  _scheduleNextHeartbeat() {
+    if (!this.heartbeatActive) return;
+    // Resting ~50bpm (slow, ominous) ramping up to a racing ~150bpm at
+    // max danger - deliberately past a realistic max heart rate for
+    // extra tension, a common horror-audio cheat.
+    const bpm = 50 + this.heartbeatIntensity * 100;
+    const intervalMs = (60 / bpm) * 1000;
+    this.heartbeatTimer = setTimeout(() => {
+      this._playHeartbeatPulse();
+      this._scheduleNextHeartbeat();
+    }, intervalMs);
+  }
+
+  _playHeartbeatPulse() {
+    const buffer = this.buffers.heartbeat;
+    if (!buffer || this.heartbeatIntensity <= 0.005) return;
     const src = this.ctx.createBufferSource();
-    src.buffer = this.buffers.heartbeat;
-    src.loop = true;
+    src.buffer = buffer;
+    src.playbackRate.value = 0.95 + this.heartbeatIntensity * 0.25;
     const gain = this.ctx.createGain();
-    gain.gain.value = 0;
+    gain.gain.value = Math.min(1, this.heartbeatIntensity) * 0.9;
     src.connect(gain).connect(this.master);
     src.start();
-    this.heartbeatSource = src;
-    this.heartbeatGain = gain;
   }
 
   setHeartbeatIntensity(t) {
     // t: 0 (silent) -> 1 (max panic)
-    if (!this.heartbeatGain) return;
-    this.heartbeatGain.gain.value = Math.max(0, Math.min(1, t)) * 1.2;
-    if (this.heartbeatSource) this.heartbeatSource.playbackRate.value = 0.85 + t * 0.7;
+    this.heartbeatIntensity = Math.max(0, Math.min(1, t));
   }
 
   startChaseMusic() {

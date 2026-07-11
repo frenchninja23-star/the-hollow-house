@@ -564,6 +564,7 @@ if (window.__EXPOSE_TEST_HOOKS__) {
     itemMeshes,
     network,
     remotePlayer,
+    audio,
     get mode() {
       return mode;
     },
