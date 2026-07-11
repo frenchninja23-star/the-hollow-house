@@ -47,7 +47,8 @@ export class Monster {
     this.jitterSeed = Math.random() * 1000;
     this.age = 0;
     this.graceTimer = GRACE_PERIOD;
-    this.aggro = 0;
+    this.aggro = 0; // derived each tick: whichever player currently has the highest aggroByPlayer value
+    this.aggroByPlayer = {};
   }
 
   _setState(next) {
@@ -64,45 +65,57 @@ export class Monster {
     };
   }
 
-  // players: array of one or two {pos, isMoving, isRunning, flashlightOn,
-  // noiseRadius} - in co-op it tracks whichever player is currently most
-  // exposed (loudest or most visible) rather than summing every player's
-  // contribution, so being in a party doesn't make detection unfairly
-  // faster just from both of you existing near it at once.
+  // players: array of one or two {id, pos, isMoving, isRunning,
+  // flashlightOn, noiseRadius}. Each player has their own independent
+  // aggro value keyed by id, accumulating/decaying purely from their own
+  // exposure - one player getting spotted or caught has zero effect on
+  // the other's number. The monster's overall state and pursuit target
+  // simply follow whichever player currently has the highest aggro. A
+  // single shared meter (the original design) meant a player who did
+  // everything right to stay hidden could still get beelined the moment
+  // they were even slightly exposed, because their partner's chase had
+  // already pumped the *shared* number up near the hunt threshold.
   update(dt, players) {
     if (this.graceTimer > 0) this.graceTimer -= dt;
     const graceActive = this.graceTimer > 0;
 
     const myCell = worldToCell(this.pos.x, this.pos.z);
     const evals = players.map((player) => this._evaluateDetection(player, myCell, graceActive));
-
     const anyTouching = evals.some((e) => e.touching);
-    const maxRate = Math.max(0, ...evals.map((e) => e.rate));
 
-    // --- Aggro: accumulates from hearing/sight/touch, decays otherwise.
     if (!graceActive) {
-      if (anyTouching) this.aggro = Math.min(AGGRO_MAX, this.aggro + AGGRO_TOUCH_SPIKE);
-      if (maxRate > 0) {
-        this.aggro = Math.min(AGGRO_MAX, this.aggro + maxRate * dt);
-      } else if (!anyTouching) {
-        this.aggro = Math.max(0, this.aggro - AGGRO_DECAY_PER_SEC * dt);
+      for (const e of evals) {
+        const id = e.player.id;
+        let value = this.aggroByPlayer[id] ?? 0;
+        if (e.touching) value = Math.min(AGGRO_MAX, value + AGGRO_TOUCH_SPIKE);
+        if (e.rate > 0) {
+          value = Math.min(AGGRO_MAX, value + e.rate * dt);
+        } else if (!e.touching) {
+          value = Math.max(0, value - AGGRO_DECAY_PER_SEC * dt);
+        }
+        this.aggroByPlayer[id] = value;
       }
     }
 
-    // Whoever is currently most exposed becomes the pursuit target -
-    // touching beats any passive detection, then higher rate, then closer.
-    let target = null;
+    // The leader is whoever currently has the highest aggro among active
+    // players - this drives the monster's overall state below. Their
+    // last-known cell only updates when they're actually detected this
+    // frame (touching/visuallyDetected/hearsPlayer, all flashlight-gated
+    // where relevant) - a high aggro value means "keyed up about this
+    // person," not "knows exactly where they are right now."
+    let leaderEval = null;
+    let leaderAggro = 0;
     for (const e of evals) {
-      if (!e.touching && !e.seesPlayer && !e.hearsPlayer) continue;
-      if (
-        !target ||
-        (e.touching && !target.touching) ||
-        (e.touching === target.touching && e.rate > target.rate) ||
-        (e.touching === target.touching && e.rate === target.rate && e.dist2D < target.dist2D)
-      ) {
-        target = e;
+      const value = this.aggroByPlayer[e.player.id] ?? 0;
+      if (!leaderEval || value > leaderAggro) {
+        leaderEval = e;
+        leaderAggro = value;
       }
     }
+    this.aggro = leaderAggro;
+
+    const target =
+      leaderEval && (leaderEval.touching || leaderEval.visuallyDetected || leaderEval.hearsPlayer) ? leaderEval : null;
     if (target) this.lastKnownCell = target.playerCell;
 
     // dist2D of the closest currently-relevant player, mostly useful for

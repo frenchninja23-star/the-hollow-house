@@ -375,7 +375,13 @@ function sendSnapshot() {
     t: "snapshot",
     hostPos: { x: player.pos.x, y: player.pos.y, z: player.pos.z },
     hostYaw: player.yaw,
+    // monster.aggro is whichever player currently has the highest aggro
+    // (the "leader," for animation/state purposes) - guestAggro is
+    // specifically the guest's own value, so their heartbeat reflects
+    // their own actual risk and not their partner's, even when the
+    // partner is the one currently being hunted.
     monster: { x: monster.pos.x, z: monster.pos.z, rotY: monster.mesh.rotation.y, state: monster.state, aggro: monster.aggro },
+    guestAggro: monster.aggroByPlayer.guest ?? 0,
     collected: itemMeshes.map((m) => m.userData.collected),
     doorOpen: state.collected >= state.total,
     hostCaught: state.hostCaught,
@@ -465,7 +471,7 @@ function tick() {
           }
 
           const localDist = Math.hypot(m.x - player.pos.x, m.z - player.pos.z);
-          const aggroT = m.aggro / 100;
+          const aggroT = (latestSnapshot.guestAggro ?? 0) / 100;
           const proximity = 1 - Math.min(localDist, 22) / 22;
           audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
         }
@@ -521,7 +527,10 @@ function tick() {
         }
         const result = players.length > 0 ? monster.update(dt, players) : { aggro: monster.aggro, dist2D: Infinity, state: monster.state };
 
-        const aggroT = result.aggro / 100;
+        // The host's own heartbeat follows the host's own aggro - not
+        // result.aggro, which is whichever player currently has the
+        // highest value and may well be the guest's, not the host's own.
+        const aggroT = (monster.aggroByPlayer.host ?? 0) / 100;
         const localDist = Math.hypot(monster.pos.x - player.pos.x, monster.pos.z - player.pos.z);
         const proximity = 1 - Math.min(localDist, 22) / 22;
         audio.setHeartbeatIntensity(Math.min(1, aggroT * 0.85 + proximity * 0.2));
